@@ -1,0 +1,59 @@
+# .github/workflows/deploy.yml
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_BACKEND: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/apple-backend
+  ECR_FRONTEND: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/apple-frontend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push Backend
+        working-directory: ./backend
+        run: |
+          docker build -t ${{ env.ECR_BACKEND }}:${{ github.sha }} .
+          docker push ${{ env.ECR_BACKEND }}:${{ github.sha }}
+
+      - name: Build & push Frontend
+        working-directory: ./frontend
+        run: |
+          docker build -t ${{ env.ECR_FRONTEND }}:${{ github.sha }} .
+          docker push ${{ env.ECR_FRONTEND }}:${{ github.sha }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name apple-cluster
+
+      - name: Update Kubernetes manifests with new image tags
+        run: |
+          sed -i "s|image: .*apple-backend:.*|image: ${{ env.ECR_BACKEND }}:${{ github.sha }}|g" k8s/backend-deployment.yaml
+          sed -i "s|image: .*apple-frontend:.*|image: ${{ env.ECR_FRONTEND }}:${{ github.sha }}|g" k8s/frontend-deployment.yaml
+
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/backend
+          kubectl rollout status deployment/frontend
